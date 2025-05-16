@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"os"
@@ -11,58 +12,66 @@ import (
 	"github.com/VuTLy/blogAggregator/internal/database"
 )
 
+type state struct {
+	db  *database.Queries
+	cfg *config.Config
+}
+
 func main() {
-	// Check if enough command-line arguments are provided. The program expects at least one argument (the command).
-	if len(os.Args) < 2 {
-		log.Fatal("Error: Not enough arguments. A command is required.") // If not enough arguments, print an error and exit.
-	}
-
-	// Initialize the state by reading the configuration file.
-	cfg, err := config.Read() // Read the configuration from the config file.
-	if err != nil {           // If an error occurs while reading the config, log the error and exit.
-		log.Fatalf("Error reading config: %v", err) // Log the error and exit the program.
-	}
-
-	// Step 7: Open a connection to the database
-	// Make sure your config struct has a field for the DB URL
-	dbURL := cfg.DBURL // Adjust this based on your actual config structure
-	db, err := sql.Open("postgres", dbURL)
+	cfg, err := config.Read()
 	if err != nil {
-		log.Fatalf("Error connecting to database: %v", err)
+		log.Fatalf("error reading config: %v", err)
 	}
-	defer db.Close() // Ensure we close the database connection when the program exits
 
-	// Create a new database queries instance
+	db, err := sql.Open("postgres", cfg.DBURL)
+	if err != nil {
+		log.Fatalf("error connecting to db: %v", err)
+	}
+	defer db.Close()
 	dbQueries := database.New(db)
 
-	// Create state with both config and database
-	state := &state{
-		cfg: &cfg,
+	programState := &state{
 		db:  dbQueries,
+		cfg: &cfg,
 	}
 
-	// Create a new commands struct and register the login handler.
-	cmds := &commands{}                  // Initialize a new commands struct that will hold the handlers.
-	cmds.register("login", handlerLogin) // Register the "login" command with the handlerLogin function.
+	cmds := commands{
+		registeredCommands: make(map[string]func(*state, command) error),
+	}
+
 	cmds.register("register", handlerRegister)
+	cmds.register("login", handlerLogin)
 	cmds.register("reset", handlerReset)
-	cmds.register("users", handlerUsers)
+	cmds.register("users", handlerListUsers)
 	cmds.register("agg", handlerAgg)
-	cmds.register("feeds", handlerFeeds)
 	cmds.register("addfeed", middlewareLoggedIn(handlerAddFeed))
+	cmds.register("feeds", handlerListFeeds)
 	cmds.register("follow", middlewareLoggedIn(handlerFollow))
-	cmds.register("following", middlewareLoggedIn(handlerFollowing))
+	cmds.register("following", middlewareLoggedIn(handlerListFeedFollows))
 	cmds.register("unfollow", middlewareLoggedIn(handlerUnfollow))
+	cmds.register("browse", middlewareLoggedIn(handlerBrowse))
 
-	// Parse the command and arguments from the command-line input.
-	cmd := command{ // Create a new command struct.
-		name: os.Args[1],  // Set the command name to the first argument (os.Args[1]).
-		args: os.Args[2:], // Set the arguments to the rest of the command-line arguments (os.Args[2:] onwards).
+	if len(os.Args) < 2 {
+		log.Fatal("Usage: cli <command> [args...]")
+		return
 	}
 
-	// Run the command by invoking the appropriate handler for the command.
-	err = cmds.run(state, cmd) // Call the run method of the cmds struct with the parsed state and command.
-	if err != nil {            // If the command execution returns an error, log the error and exit.
-		log.Fatal(err) // Log the error and terminate the program.
+	cmdName := os.Args[1]
+	cmdArgs := os.Args[2:]
+
+	err = cmds.run(programState, command{Name: cmdName, Args: cmdArgs})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) error) func(*state, command) error {
+	return func(s *state, cmd command) error {
+		user, err := s.db.GetUser(context.Background(), s.cfg.CurrentUserName)
+		if err != nil {
+			return err
+		}
+
+		return handler(s, cmd, user)
 	}
 }
